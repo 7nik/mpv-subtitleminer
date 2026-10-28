@@ -840,6 +840,8 @@
   const ankiSuccess = ref<Record<string, boolean>>({})
   const ankiError = ref<Record<string, string>>({})
   const targetCardPreview = ref<string | null>(null)
+  // Which of the configured word-card media fields already hold something on the target note.
+  const targetCardMedia = ref({ audio: false, image: false })
   const loadingTargetCard = ref(false)
 
   const host = computed(() => settings.value.connection.host)
@@ -1094,13 +1096,16 @@
       !ankiConfigured.value
     ) {
       targetCardPreview.value = null
+      targetCardMedia.value = { audio: false, image: false }
       return
     }
 
     loadingTargetCard.value = true
     try {
-      const { noteType, frontField } = settings.value.anki.word
+      const { noteType, frontField, audioField, imageField } = settings.value.anki.word
       const targetNote = await anki.getLastNote(noteType)
+      const isFilled = (field: string) => !!field && !!targetNote?.fields[field]?.value.trim()
+      targetCardMedia.value = { audio: isFilled(audioField), image: isFilled(imageField) }
 
       if (targetNote) {
         let preview = ''
@@ -1124,6 +1129,7 @@
       }
     } catch {
       targetCardPreview.value = null
+      targetCardMedia.value = { audio: false, image: false }
     } finally {
       loadingTargetCard.value = false
     }
@@ -1993,6 +1999,20 @@
           @click="sendSelectionToAnki"
         >
           Add to word card<template v-if="targetCardPreview">: {{ targetCardPreview }}</template>
+          <template v-if="targetCardPreview">
+            <span
+              v-if="targetCardMedia.audio"
+              class="media-filled"
+              title="Target card already has audio; it will be replaced"
+              >🔊</span
+            >
+            <span
+              v-if="targetCardMedia.image"
+              class="media-filled"
+              title="Target card already has an image; it will be replaced"
+              >🖼</span
+            >
+          </template>
         </button>
         <button
           v-if="sentenceConfigured"
@@ -3347,6 +3367,14 @@
 
   .selection-btn.send-btn:hover {
     background: #38764c;
+  }
+
+  .selection-btn .media-filled {
+    margin-left: 6px;
+    padding: 1px 5px;
+    border-radius: 4px;
+    background: rgba(0, 0, 0, 0.25);
+    font-size: 0.85em;
   }
 
   .selection-btn.create-btn {
