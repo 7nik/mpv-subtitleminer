@@ -842,6 +842,12 @@
   const targetCardPreview = ref<string | null>(null)
   // Which of the configured word-card media fields already hold something on the target note.
   const targetCardMedia = ref({ audio: false, image: false })
+  // One-shot opt-in for the next word-card addition: take the image at the player's current
+  // position instead of the selected subtitles. Still images only.
+  const screenshotAtPlayerTime = ref(false)
+  const canScreenshotAtPlayerTime = computed(
+    () => !!settings.value.anki.word.imageField && !settings.value.media.imageAnimated,
+  )
   const loadingTargetCard = ref(false)
 
   const host = computed(() => settings.value.connection.host)
@@ -925,6 +931,14 @@
         }
         const key = `${type === 'thumbnail' ? 'thumb' : 'audio'}-${port}-${media.id}`
         delete loadingMedia.value[key]
+        return
+      }
+
+      if (type === 'screenshot') {
+        const requestId = asNumber(d.request_id)
+        if (requestId === null) return
+        screenshotWaiters.get(requestId)?.(asString(d.data) ?? undefined)
+        screenshotWaiters.delete(requestId)
         return
       }
 
@@ -1310,6 +1324,7 @@
     mediaId: number,
     audioField: string,
     imageField: string,
+    atPlayerTime = false,
   ): Promise<Record<string, string>> {
     const fields: Record<string, string> = {}
     if (!first || !last) return fields
@@ -1339,9 +1354,14 @@
 
     const imageTask = async () => {
       if (!imageField) return
-      let imageData = primaryMsgs.length === 1 ? first.thumbnail : undefined
+      let imageData: string | undefined
 
-      if (!imageData) {
+      if (atPlayerTime) {
+        imageData = await requestScreenshot(first.sourcePort)
+        if (!imageData) toast.warning('Failed to take a screenshot at the player position.')
+      } else if (primaryMsgs.length === 1 && first.thumbnail) {
+        imageData = first.thumbnail
+      } else {
         imageData = await requestMediaFromServer(
           first,
           'thumbnail',
@@ -1462,14 +1482,24 @@
           )
         }
 
+        const atPlayerTime = screenshotAtPlayerTime.value && canScreenshotAtPlayerTime.value
         Object.assign(
           fieldUpdates,
-          await buildMediaFields(primaryMsgs, first, last, mediaId, audioField, imageField),
+          await buildMediaFields(
+            primaryMsgs,
+            first,
+            last,
+            mediaId,
+            audioField,
+            imageField,
+            atPlayerTime,
+          ),
         )
 
         if (Object.keys(fieldUpdates).length === 0) return null
 
         await anki.updateNoteFields(targetNote.noteId, fieldUpdates)
+        screenshotAtPlayerTime.value = false
         const tags = settings.value.anki.word.tags
         if (tags.length > 0) {
           // The fields are already committed at this point, so a tagging
@@ -1598,6 +1628,30 @@
         delete loadingMedia.value[key]
         resolve(type === 'thumbnail' ? msg.thumbnail : msg.audio)
       }, 10000)
+    })
+  }
+
+  // Still screenshot at mpv's current position. Each request carries its own id, which the server
+  // echoes back, so concurrent requests resolve independently.
+  const screenshotWaiters = new Map<number, (data: string | undefined) => void>()
+  let nextScreenshotRequestId = 1
+
+  const requestScreenshot = (port: number): Promise<string | undefined> => {
+    return new Promise((resolve) => {
+      const requestId = nextScreenshotRequestId++
+      const payload = { request: 'screenshot', request_id: requestId, ...getImageParams() }
+      if (!sendToPort(payload, port)) {
+        resolve(undefined)
+        return
+      }
+      const timer = setTimeout(() => {
+        screenshotWaiters.delete(requestId)
+        resolve(undefined)
+      }, 10000)
+      screenshotWaiters.set(requestId, (data) => {
+        clearTimeout(timer)
+        resolve(data)
+      })
     })
   }
 
@@ -1991,6 +2045,17 @@
         <span v-else class="selection-hint">Click on subtitles to select them for Anki</span>
       </div>
       <div class="selection-right">
+        <label
+          v-if="canScreenshotAtPlayerTime"
+          class="player-time-toggle"
+          title="Use the frame at the player's current position as the card image"
+        >
+          <span class="switch">
+            <input v-model="screenshotAtPlayerTime" type="checkbox" />
+            <span class="slider"></span>
+          </span>
+          Use current frame
+        </label>
         <button
           class="selection-btn send-btn"
           :disabled="
@@ -3317,6 +3382,66 @@
     align-items: center;
     gap: 8px;
     flex-shrink: 0;
+  }
+
+  .player-time-toggle {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    color: #7e8898;
+    font-size: 0.85em;
+    cursor: pointer;
+    user-select: none;
+    white-space: nowrap;
+  }
+
+  /* Toggle switch, matching the ones in MediaConfiguration. */
+  .switch {
+    position: relative;
+    display: inline-block;
+    width: 34px;
+    height: 18px;
+  }
+
+  .switch input {
+    opacity: 0;
+    width: 0;
+    height: 0;
+  }
+
+  .slider {
+    position: absolute;
+    cursor: pointer;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background-color: #1f252e;
+    transition: 0.3s;
+    border-radius: 34px;
+    border: 1px solid #2a303b;
+  }
+
+  .slider:before {
+    position: absolute;
+    content: '';
+    height: 12px;
+    width: 12px;
+    left: 2px;
+    bottom: 2px;
+    background-color: #a7b4c7;
+    transition: 0.3s;
+    border-radius: 50%;
+  }
+
+  input:checked + .slider {
+    background-color: #374151;
+    border-color: #4b5563;
+  }
+
+  input:checked + .slider:before {
+    transform: translateX(16px);
+    background-color: #3ddc97;
   }
 
   .selection-hint {
